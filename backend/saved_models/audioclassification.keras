@@ -1,0 +1,139 @@
+
+import os
+import numpy as np
+import pandas as pd
+import librosa
+from tqdm import tqdm
+import warnings
+
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import Dense, Dropout, Activation
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.utils import to_categorical
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+
+warnings.filterwarnings("ignore")
+
+def features_extractor(file_path):
+    """
+    Load an audio file and extract MFCC features.
+    Returns a 40-dimensional feature vector.
+    """
+    audio, sample_rate = librosa.load(file_path, res_type='kaiser_fast')
+    mfccs = librosa.feature.mfcc(y=audio, sr=sample_rate, n_mfcc=40)
+    mfccs_scaled_features = np.mean(mfccs.T, axis=0)
+    return mfccs_scaled_features
+
+def load_dataset(audio_dataset_path, metadata_path):
+    """
+    Iterates through the metadata CSV and extracts features from each corresponding audio file.
+    """
+    metadata = pd.read_csv(metadata_path)
+    extracted_features = []
+    
+    for index_num, row in tqdm(metadata.iterrows(), total=len(metadata)):
+        fold = row["fold"]
+        file_name = row["slice_file_name"]
+        class_label = row["class"]
+        file_path = os.path.join(os.path.abspath(audio_dataset_path), 'fold' + str(fold), file_name)
+        if os.path.exists(file_path):
+            features = features_extractor(file_path)
+            extracted_features.append([features, class_label])
+        else:
+            print(f"Warning: File {file_path} not found.")
+    
+    extracted_features_df = pd.DataFrame(extracted_features, columns=['feature', 'class'])
+    return extracted_features_df
+
+def build_model(input_dim, num_labels):
+    """
+    Creates a Sequential Keras model with three hidden Dense layers and dropout regularization.
+    """
+    model = Sequential()
+    model.add(Dense(100, input_shape=(input_dim,)))
+    model.add(Activation('relu'))
+    model.add(Dropout(0.5))
+    
+    model.add(Dense(200))
+    model.add(Activation('relu'))
+    model.add(Dropout(0.5))
+    
+    model.add(Dense(100))
+    model.add(Activation('relu'))
+    model.add(Dropout(0.5))
+    
+    model.add(Dense(num_labels))
+    model.add(Activation('softmax'))
+    
+    model.compile(loss='categorical_crossentropy', metrics=['accuracy'], optimizer='adam')
+    return model
+
+def main():
+    # Update these paths as required.
+    dataset_path = "UrbanSound8K/audio"
+    metadata_path = "UrbanSound8K/metadata/UrbanSound8K.csv"
+    
+    print("Extracting features from dataset...")
+    features_df = load_dataset(dataset_path, metadata_path)
+    
+    # Prepare features and labels
+    X = np.array(features_df['feature'].tolist())
+    y = np.array(features_df['class'].tolist())
+    
+    # Encode labels to numerical values and one-hot encode for model training
+    labelencoder = LabelEncoder()
+    y_encoded = labelencoder.fit_transform(y)
+    y_categorical = to_categorical(y_encoded)
+    
+    # Split dataset into training and testing sets.
+    X_train, X_test, y_train, y_test = train_test_split(X, y_categorical, test_size=0.2, random_state=0)
+    
+    print("Building the model...")
+    input_dim = X_train.shape[1]  # Should be 40 MFCC features
+    num_labels = y_categorical.shape[1]  # For UrbanSound8K, typically 10 classes
+    model = build_model(input_dim, num_labels)
+    model.summary()
+    
+    # Ensure the directory exists for saving the model
+    save_dir = "saved_models"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    
+    checkpoint_filepath = os.path.join(save_dir, "audio_classification.keras")
+    checkpointer = ModelCheckpoint(filepath=checkpoint_filepath, verbose=1, save_best_only=True)
+    
+    # Train the model
+    epochs = 100
+    batch_size = 32
+    print("Training the model...")
+    model.fit(X_train, y_train, batch_size=batch_size, epochs=epochs,
+              validation_data=(X_test, y_test), callbacks=[checkpointer], verbose=1)
+    
+    # Evaluate the model on the test set
+    test_loss, test_accuracy = model.evaluate(X_test, y_test, verbose=0)
+    print("Test Accuracy: {:.2f}%".format(test_accuracy * 100))
+    
+    # Save the final model if desired.
+    final_model_path = os.path.join(save_dir, "final_audio_classification_model.keras")
+    model.save(final_model_path)
+    print("Final model saved to:", final_model_path)
+    
+    # Perform a test prediction on a sample audio file (update the sample file path as needed)
+    sample_file = "UrbanSound8K/drilling_1.wav"
+    if os.path.exists(sample_file):
+        audio, sample_rate = librosa.load(sample_file, res_type='kaiser_fast')
+        mfccs = librosa.feature.mfcc(y=audio, sr=sample_rate, n_mfcc=40)
+        mfccs_scaled = np.mean(mfccs.T, axis=0)
+        mfccs_scaled = mfccs_scaled.reshape(1, -1)
+        predicted_probabilities = model.predict(mfccs_scaled)
+        predicted_label = np.argmax(predicted_probabilities, axis=1)
+        predicted_class = labelencoder.inverse_transform(predicted_label)
+        print("Predicted Label Index:", predicted_label[0])
+        print("Predicted Class:", predicted_class[0])
+    else:
+        print(f"Sample file {sample_file} not found. Skipping test prediction.")
+
+if __name__ == "__main__":
+    main()
